@@ -246,17 +246,8 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, params stack.Netw
 	pkt.NetworkHeader = buffer.View(ip)
 
 	if r.Loop&stack.PacketLoop != 0 {
-		// The inbound path expects the network header to still be in
-		// the PacketBuffer's Data field.
-		views := make([]buffer.View, 1, 1+len(pkt.Data.Views()))
-		views[0] = pkt.Header.View()
-		views = append(views, pkt.Data.Views()...)
 		loopedR := r.MakeLoopedRoute()
-
-		e.HandlePacket(&loopedR, tcpip.PacketBuffer{
-			Data: buffer.NewVectorisedView(len(views[0])+pkt.Data.Size(), views),
-		})
-
+		e.HandlePacket(&loopedR, pkt)
 		loopedR.Release()
 	}
 	if r.Loop&stack.PacketOut == 0 {
@@ -345,18 +336,11 @@ func (e *endpoint) WriteHeaderIncludedPacket(r *stack.Route, pkt tcpip.PacketBuf
 // HandlePacket is called by the link layer when new ipv4 packets arrive for
 // this endpoint.
 func (e *endpoint) HandlePacket(r *stack.Route, pkt tcpip.PacketBuffer) {
-	headerView := pkt.Data.First()
-	h := header.IPv4(headerView)
-	if !h.IsValid(pkt.Data.Size()) {
+	h := header.IPv4(pkt.NetworkHeader)
+	if !h.IsValid(pkt.Data.Size() + len(pkt.NetworkHeader) + len(pkt.TransportHeader)) {
 		r.Stats().IP.MalformedPacketsReceived.Increment()
 		return
 	}
-	pkt.NetworkHeader = headerView[:h.HeaderLength()]
-
-	hlen := int(h.HeaderLength())
-	tlen := int(h.TotalLength())
-	pkt.Data.TrimFront(hlen)
-	pkt.Data.CapLength(tlen - hlen)
 
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
@@ -399,7 +383,7 @@ func (e *endpoint) HandlePacket(r *stack.Route, pkt tcpip.PacketBuffer) {
 	}
 	p := h.TransportProtocol()
 	if p == header.ICMPv4ProtocolNumber {
-		headerView.CapLength(hlen)
+		pkt.NetworkHeader.CapLength(int(h.HeaderLength()))
 		e.handleICMP(r, pkt)
 		return
 	}
@@ -478,6 +462,20 @@ func (*protocol) Close() {}
 
 // Wait implements stack.TransportProtocol.Wait.
 func (*protocol) Wait() {}
+
+// Parse implements stack.TransportProtocol.Parse.
+func (*protocol) Parse(pkt *tcpip.PacketBuffer) (tcpip.TransportProtocolNumber, bool) {
+	h := header.IPv4(pkt.Data.First())
+	trim := header.IPv4MinimumSize
+	hlen := int(h.HeaderLength())
+	if header.IPv4MinimumSize < hlen && hlen <= len(h) {
+		trim = hlen
+	}
+	pkt.NetworkHeader = buffer.View(h)[:trim]
+	pkt.Data.TrimFront(trim)
+	pkt.Data.CapLength(int(h.TotalLength()) - hlen)
+	return h.TransportProtocol(), true
+}
 
 // calculateMTU calculates the network-layer payload MTU based on the link-layer
 // payload mtu.
