@@ -8,6 +8,7 @@ go_library(
         "default_file.go",
         "host.go",
         "util.go",
+        "util_unsafe.go",
     ],
     visibility = ["//pkg/sentry:internal"],
     deps = [
