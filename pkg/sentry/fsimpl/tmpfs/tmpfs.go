@@ -168,6 +168,9 @@ type inode struct {
 const maxLinks = math.MaxUint32
 
 func (i *inode) init(impl interface{}, fs *filesystem, creds *auth.Credentials, mode linux.FileMode) {
+	if mode.FileType() == 0 {
+		panic("file type is required in FileMode")
+	}
 	i.clock = fs.clock
 	i.refs = 1
 	i.mode = uint32(mode)
@@ -242,8 +245,9 @@ func (i *inode) decRef() {
 	}
 }
 
-func (i *inode) checkPermissions(creds *auth.Credentials, ats vfs.AccessTypes, isDir bool) error {
-	return vfs.GenericCheckPermissions(creds, ats, isDir, uint16(atomic.LoadUint32(&i.mode)), auth.KUID(atomic.LoadUint32(&i.uid)), auth.KGID(atomic.LoadUint32(&i.gid)))
+func (i *inode) checkPermissions(creds *auth.Credentials, ats vfs.AccessTypes) error {
+	mode := linux.FileMode(atomic.LoadUint32(&i.mode))
+	return vfs.GenericCheckPermissions(creds, ats, mode, auth.KUID(atomic.LoadUint32(&i.uid)), auth.KGID(atomic.LoadUint32(&i.gid)))
 }
 
 // Go won't inline this function, and returning linux.Statx (which is quite
@@ -269,31 +273,21 @@ func (i *inode) statTo(stat *linux.Statx) {
 	// TODO(gvisor.dev/issues/1197): Device number.
 	switch impl := i.impl.(type) {
 	case *regularFile:
-		stat.Mode |= linux.S_IFREG
 		stat.Mask |= linux.STATX_SIZE | linux.STATX_BLOCKS
 		stat.Size = uint64(atomic.LoadUint64(&impl.size))
 		// In tmpfs, this will be FileRangeSet.Span() / 512 (but also cached in
 		// a uint64 accessed using atomic memory operations to avoid taking
 		// locks).
 		stat.Blocks = allocatedBlocksForSize(stat.Size)
-	case *directory:
-		stat.Mode |= linux.S_IFDIR
 	case *symlink:
-		stat.Mode |= linux.S_IFLNK
 		stat.Mask |= linux.STATX_SIZE | linux.STATX_BLOCKS
 		stat.Size = uint64(len(impl.target))
 		stat.Blocks = allocatedBlocksForSize(stat.Size)
-	case *namedPipe:
-		stat.Mode |= linux.S_IFIFO
 	case *deviceFile:
-		switch impl.kind {
-		case vfs.BlockDevice:
-			stat.Mode |= linux.S_IFBLK
-		case vfs.CharDevice:
-			stat.Mode |= linux.S_IFCHR
-		}
 		stat.RdevMajor = impl.major
 		stat.RdevMinor = impl.minor
+	case *directory, *namedPipe:
+		// Nothing to do.
 	default:
 		panic(fmt.Sprintf("unknown inode type: %T", i.impl))
 	}
@@ -306,7 +300,8 @@ func (i *inode) setStat(ctx context.Context, creds *auth.Credentials, stat *linu
 	if stat.Mask&^(linux.STATX_MODE|linux.STATX_UID|linux.STATX_GID|linux.STATX_ATIME|linux.STATX_MTIME|linux.STATX_CTIME|linux.STATX_SIZE) != 0 {
 		return syserror.EPERM
 	}
-	if err := vfs.CheckSetStat(ctx, creds, stat, uint16(atomic.LoadUint32(&i.mode))&^linux.S_IFMT, auth.KUID(atomic.LoadUint32(&i.uid)), auth.KGID(atomic.LoadUint32(&i.gid))); err != nil {
+	mode := linux.FileMode(atomic.LoadUint32(&i.mode))
+	if err := vfs.CheckSetStat(ctx, creds, stat, mode, auth.KUID(atomic.LoadUint32(&i.uid)), auth.KGID(atomic.LoadUint32(&i.gid))); err != nil {
 		return err
 	}
 	i.mu.Lock()
