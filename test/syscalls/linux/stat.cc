@@ -700,8 +700,12 @@ TEST_F(StatTest, StatxInvalidFlags) {
   struct kernel_statx stx;
   EXPECT_THAT(statx(AT_FDCWD, test_file_name_.c_str(), 12345, 0, &stx),
               SyscallFailsWithErrno(EINVAL));
+
+  // Sync flags are multially exclusive.
+  constexpr int AT_STATX_FORCE_SYNC = 0x2000;
+  constexpr int AT_STATX_DONT_SYNC = 0x4000;
   EXPECT_THAT(statx(AT_FDCWD, test_file_name_.c_str(),
-                    0x6000 /* AT_STATX_SYNC_TYPE */, 0, &stx),
+                    AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC, 0, &stx),
               SyscallFailsWithErrno(EINVAL));
 }
 

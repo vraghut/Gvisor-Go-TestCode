@@ -454,6 +454,9 @@ func (fs *filesystem) unlinkAt(ctx context.Context, rp *vfs.ResolvingPath, dir b
 	}
 	if fs.opts.interop != InteropModeShared {
 		parent.touchCMtime(ctx)
+		if dir {
+			parent.decLinks()
+		}
 		parent.cacheNegativeChildLocked(name)
 		parent.dirents = nil
 	}
@@ -570,6 +573,11 @@ func (fs *filesystem) MkdirAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 	return fs.doCreateAt(ctx, rp, true /* dir */, func(parent *dentry, name string) error {
 		creds := rp.Credentials()
 		_, err := parent.file.mkdir(ctx, name, (p9.FileMode)(opts.Mode), (p9.UID)(creds.EffectiveKUID), (p9.GID)(creds.EffectiveKGID))
+		if err == nil {
+			if fs.opts.interop != InteropModeShared {
+				parent.incLinks()
+			}
+		}
 		return err
 	})
 }
@@ -579,6 +587,11 @@ func (fs *filesystem) MknodAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 	return fs.doCreateAt(ctx, rp, false /* dir */, func(parent *dentry, name string) error {
 		creds := rp.Credentials()
 		_, err := parent.file.mknod(ctx, name, (p9.FileMode)(opts.Mode), opts.DevMajor, opts.DevMinor, (p9.UID)(creds.EffectiveKUID), (p9.GID)(creds.EffectiveKGID))
+		if err == nil {
+			if fs.opts.interop != InteropModeShared {
+				parent.incLinks()
+			}
+		}
 		return err
 	})
 }
@@ -962,6 +975,10 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 		oldParent.dirents = nil
 		delete(newParent.negativeChildren, newName)
 		newParent.dirents = nil
+		if renamed.isDir() {
+			oldParent.decLinks()
+			newParent.incLinks()
+		}
 	}
 	vfsObj.CommitRenameReplaceDentry(&renamed.vfsd, &newParent.vfsd, newName, replacedVFSD)
 	return nil

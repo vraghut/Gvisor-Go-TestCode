@@ -483,7 +483,8 @@ type dentry struct {
 	btime int64
 	// File size, protected by both metadataMu and dataMu (i.e. both must be
 	// locked to mutate it).
-	size uint64
+	size  uint64
+	nlink uint32
 
 	mapsMu sync.Mutex
 
@@ -604,6 +605,9 @@ func (fs *filesystem) newDentry(ctx context.Context, file p9file, qid p9.QID, ma
 	if mask.BTime {
 		d.btime = dentryTimestampFromP9(attr.BTimeSeconds, attr.BTimeNanoSeconds)
 	}
+	if mask.NLink {
+		d.nlink = uint32(attr.NLink)
+	}
 	d.vfsd.Init(d)
 
 	fs.syncMu.Lock()
@@ -644,6 +648,9 @@ func (d *dentry) updateFromP9Attrs(mask p9.AttrMask, attr *p9.Attr) {
 	}
 	if mask.BTime {
 		atomic.StoreInt64(&d.btime, dentryTimestampFromP9(attr.BTimeSeconds, attr.BTimeNanoSeconds))
+	}
+	if mask.NLink {
+		d.nlink = uint32(attr.NLink)
 	}
 	if mask.Size {
 		d.dataMu.Lock()
@@ -687,10 +694,7 @@ func (d *dentry) fileType() uint32 {
 func (d *dentry) statTo(stat *linux.Statx) {
 	stat.Mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_NLINK | linux.STATX_UID | linux.STATX_GID | linux.STATX_ATIME | linux.STATX_MTIME | linux.STATX_CTIME | linux.STATX_INO | linux.STATX_SIZE | linux.STATX_BLOCKS | linux.STATX_BTIME
 	stat.Blksize = atomic.LoadUint32(&d.blockSize)
-	stat.Nlink = 1
-	if d.isDir() {
-		stat.Nlink = 2
-	}
+	stat.Nlink = atomic.LoadUint32(&d.nlink)
 	stat.UID = atomic.LoadUint32(&d.uid)
 	stat.GID = atomic.LoadUint32(&d.gid)
 	stat.Mode = uint16(atomic.LoadUint32(&d.mode))
@@ -703,7 +707,7 @@ func (d *dentry) statTo(stat *linux.Statx) {
 	stat.Btime = statxTimestampFromDentry(atomic.LoadInt64(&d.btime))
 	stat.Ctime = statxTimestampFromDentry(atomic.LoadInt64(&d.ctime))
 	stat.Mtime = statxTimestampFromDentry(atomic.LoadInt64(&d.mtime))
-	// TODO(jamieliu): device number
+	// TODO(gvisor.dev/issue/1198): device number
 }
 
 func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, stat *linux.Statx, mnt *vfs.Mount) error {
@@ -1094,6 +1098,14 @@ func (d *dentry) ensureSharedHandle(ctx context.Context, read, write, trunc bool
 	return nil
 }
 
+func (d *dentry) incLinks() {
+	atomic.AddUint32(&d.nlink, 1)
+}
+
+func (d *dentry) decLinks() {
+	atomic.AddUint32(&d.nlink, ^uint32(0))
+}
+
 // fileDescription is embedded by gofer implementations of
 // vfs.FileDescriptionImpl.
 type fileDescription struct {
@@ -1112,7 +1124,8 @@ func (fd *fileDescription) dentry() *dentry {
 // Stat implements vfs.FileDescriptionImpl.Stat.
 func (fd *fileDescription) Stat(ctx context.Context, opts vfs.StatOptions) (linux.Statx, error) {
 	d := fd.dentry()
-	if d.fs.opts.interop == InteropModeShared && opts.Mask&(linux.STATX_MODE|linux.STATX_UID|linux.STATX_GID|linux.STATX_ATIME|linux.STATX_MTIME|linux.STATX_CTIME|linux.STATX_SIZE|linux.STATX_BLOCKS|linux.STATX_BTIME) != 0 && opts.Sync != linux.AT_STATX_DONT_SYNC {
+	validMask := uint32(linux.STATX_MODE | linux.STATX_UID | linux.STATX_GID | linux.STATX_ATIME | linux.STATX_MTIME | linux.STATX_CTIME | linux.STATX_SIZE | linux.STATX_BLOCKS | linux.STATX_BTIME)
+	if d.fs.opts.interop == InteropModeShared && opts.Mask&(validMask) != 0 && opts.Sync != linux.AT_STATX_DONT_SYNC {
 		// TODO(jamieliu): Use specialFileFD.handle.file for the getattr if
 		// available?
 		if err := d.updateFromGetattr(ctx); err != nil {

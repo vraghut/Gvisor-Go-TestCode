@@ -331,8 +331,9 @@ func (rp *ResolvingPath) ResolveComponent(d *Dentry) (*Dentry, error) {
 //
 // Preconditions: !rp.Done().
 func (rp *ResolvingPath) ShouldFollowSymlink() bool {
-	// Non-final symlinks are always followed.
-	return rp.flags&rpflagsFollowFinalSymlink != 0 || !rp.Final()
+	// Non-final symlinks are always followed. Paths terminated with '/' are also
+	// always followed.
+	return rp.flags&rpflagsFollowFinalSymlink != 0 || !rp.Final() || rp.MustBeDir()
 }
 
 // HandleSymlink is called when the current path component is a symbolic link
